@@ -1,0 +1,30 @@
+repo:
+  canonical_branch: "main"
+tracker:
+  kind: "feishu_task"
+  tasklist_guid: "YOUR_TASKLIST_GUID"
+  identity: "user"
+  task_key_prefix: "demo"
+  lark_cli_command: "lark-cli"
+  default_stage: "Backlog"
+  builder_states:
+    - Building
+    - Merging
+  planner_states:
+    - Planning
+  auditor_states:
+    - Auditing
+  terminal_states:
+    - Done
+    - Canceled
+polling:
+  interval_ms: 15000
+workspace:
+  root: "/tmp/march-workspaces"
+agent:
+  max_concurrent_agents: 4
+  max_turns: 20
+codex:
+  command: codex app-server
+  approval_policy: never
+  thread_sandbox: danger-full-access

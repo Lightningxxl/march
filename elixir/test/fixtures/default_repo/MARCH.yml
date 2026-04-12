@@ -1,0 +1,37 @@
+tracker:
+  kind: memory
+  tasklist_guid: null
+  identity: "user"
+  lark_cli_command: "lark-cli"
+  default_stage: "Backlog"
+  active_states: ["Building", "Merging"]
+  builder_states: ["Building", "Merging"]
+  planner_states: ["Planning"]
+  auditor_states: ["Auditing"]
+  terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+polling:
+  interval_ms: 30000
+workspace:
+  root: "/tmp/march_workspaces"
+agent:
+  max_concurrent_agents: 10
+  max_turns: 20
+  max_retry_backoff_ms: 300000
+  max_concurrent_agents_by_state: {}
+codex:
+  command: "codex app-server"
+  approval_policy:
+    reject:
+      sandbox_approval: true
+      rules: true
+      mcp_elicitations: true
+  thread_sandbox: "workspace-write"
+  turn_timeout_ms: 3600000
+  read_timeout_ms: 5000
+  stall_timeout_ms: 300000
+hooks:
+  timeout_ms: 60000
+observability:
+  enabled: false
+  refresh_ms: 1000
+  render_interval_ms: 16

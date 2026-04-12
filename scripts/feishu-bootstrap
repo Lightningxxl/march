@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""Validate local Feishu task tooling and bootstrap a March tasklist."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+
+
+MIN_LARK_CLI_VERSION = (1, 0, 5)
+REQUIRED_SCOPES = [
+    "task:task:read",
+    "task:task:write",
+    "task:tasklist:read",
+    "task:tasklist:write",
+    "task:comment:read",
+    "task:comment:write",
+    "task:custom_field:read",
+    "task:custom_field:write",
+    "task:section:read",
+    "task:section:write",
+]
+REQUIRED_SECTIONS = [
+    "Planning",
+    "Building",
+    "Auditing",
+    "Human Review",
+    "Merging",
+    "Done",
+    "Canceled",
+]
+REQUIRED_TEXT_FIELDS = [
+    "Current Plan",
+    "Builder Workpad",
+    "Auditor Verdict",
+    "PR",
+    "Task Key",
+]
+TASK_KIND_OPTIONS = [
+    {"name": "feature", "color_index": 26},
+    {"name": "bug", "color_index": 3},
+    {"name": "improvement", "color_index": 16},
+    {"name": "refactor", "color_index": 21},
+    {"name": "docs", "color_index": 31},
+    {"name": "chore", "color_index": 36},
+]
+
+
+class BootstrapError(RuntimeError):
+    pass
+
+
+@dataclass
+class TasklistInfo:
+    guid: str
+    name: str | None = None
+    url: str | None = None
+
+
+def print_status(level: str, message: str) -> None:
+    print(f"{level:<4} {message}")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Validate lark-cli and bootstrap a Feishu tasklist for March."
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--tasklist-guid", help="Bootstrap an existing tasklist.")
+    group.add_argument("--create-tasklist", metavar="NAME", help="Create and bootstrap a new tasklist.")
+    parser.add_argument(
+        "--identity",
+        default="user",
+        choices=["user", "bot", "auto"],
+        help="Identity passed to lark-cli task operations.",
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Only validate local lark-cli/auth/scopes and exit.",
+    )
+    parser.add_argument(
+        "--task-key-prefix",
+        default="demo",
+        help="Prefix shown in the generated MARCH.yml snippet.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    if not args.check_only and not (args.tasklist_guid or args.create_tasklist):
+        raise BootstrapError(
+            "choose one of --tasklist-guid or --create-tasklist, or use --check-only"
+        )
+
+    cli_version = validate_cli_version()
+    auth_payload = validate_auth()
+    validate_scopes(auth_payload)
+
+    if args.check_only:
+        print_status("ok", "Feishu bootstrap checks passed")
+        return 0
+
+    tasklist = (
+        create_tasklist(args.create_tasklist, args.identity)
+        if args.create_tasklist
+        else lookup_tasklist(args.tasklist_guid, args.identity)
+    )
+
+    print_status(
+        "ok",
+        f"tasklist: {tasklist.guid}"
+        + (f" name={tasklist.name}" if tasklist.name else "")
+        + (f" url={tasklist.url}" if tasklist.url else ""),
+    )
+
+    ensure_sections(tasklist.guid, args.identity)
+    ensure_custom_fields(tasklist.guid, args.identity)
+
+    print()
+    print("# MARCH.yml snippet")
+    print("tracker:")
+    print('  kind: "feishu_task"')
+    print(f'  tasklist_guid: "{tasklist.guid}"')
+    print(f'  identity: "{args.identity}"')
+    print(f'  task_key_prefix: "{args.task_key_prefix}"')
+    print('  lark_cli_command: "lark-cli"')
+    print('  default_stage: "Backlog"')
+    print("  builder_states:")
+    print("    - Building")
+    print("    - Merging")
+    print("  planner_states:")
+    print("    - Planning")
+    print("  auditor_states:")
+    print("    - Auditing")
+    print("  terminal_states:")
+    print("    - Done")
+    print("    - Canceled")
+    print()
+    print("# Notes")
+    print("- Feishu keeps an undeletable default unnamed section. March treats it as Backlog.")
+    print(f"- lark-cli version checked: {cli_version}")
+    print("- If you want March to update tasks as your user, keep tracker.identity=user.")
+    return 0
+
+
+def validate_cli_version() -> str:
+    output = run_raw(["lark-cli", "--version"])
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", output)
+    if not match:
+        raise BootstrapError(f"unable to parse lark-cli version from: {output.strip()}")
+
+    version = tuple(int(part) for part in match.groups())
+    version_string = ".".join(match.groups())
+    if version < MIN_LARK_CLI_VERSION:
+        required = ".".join(str(part) for part in MIN_LARK_CLI_VERSION)
+        raise BootstrapError(f"lark-cli {version_string} is too old; require >= {required}")
+
+    print_status("ok", f"lark-cli version: {version_string}")
+    return version_string
+
+
+def validate_auth() -> dict:
+    payload = run_json(["lark-cli", "auth", "status"])
+    token_status = payload.get("tokenStatus")
+    if token_status != "valid":
+        raise BootstrapError(f"lark-cli auth token is not valid: {token_status}")
+
+    identity = payload.get("identity", "unknown")
+    user_name = payload.get("userName", "unknown")
+    print_status("ok", f"auth: identity={identity} user={user_name} token={token_status}")
+    return payload
+
+
+def validate_scopes(auth_payload: dict) -> None:
+    granted = set(str(auth_payload.get("scope", "")).split())
+    missing = [scope for scope in REQUIRED_SCOPES if scope not in granted]
+    if missing:
+        raise BootstrapError("missing required Feishu scopes: " + ", ".join(missing))
+    print_status("ok", f"scopes: {len(REQUIRED_SCOPES)} required task scopes present")
+
+
+def create_tasklist(name: str, identity: str) -> TasklistInfo:
+    payload = run_json(
+        [
+            "lark-cli",
+            "task",
+            "tasklists",
+            "create",
+            "--as",
+            identity,
+            "--data",
+            json.dumps({"name": name}, ensure_ascii=False),
+        ]
+    )
+    tasklist = payload["data"]["tasklist"]
+    return TasklistInfo(
+        guid=tasklist["guid"],
+        name=tasklist.get("name"),
+        url=tasklist.get("url"),
+    )
+
+
+def lookup_tasklist(tasklist_guid: str, identity: str) -> TasklistInfo:
+    payload = run_json(
+        [
+            "lark-cli",
+            "task",
+            "tasklists",
+            "list",
+            "--as",
+            identity,
+            "--page-all",
+        ]
+    )
+    for item in payload.get("data", {}).get("items", []):
+        if item.get("guid") == tasklist_guid:
+            return TasklistInfo(
+                guid=tasklist_guid,
+                name=item.get("name"),
+                url=item.get("url"),
+            )
+    raise BootstrapError(f"tasklist not found or not visible to current identity: {tasklist_guid}")
+
+
+def ensure_sections(tasklist_guid: str, identity: str) -> None:
+    sections = list_sections(tasklist_guid, identity)
+    default_section = next(
+        (
+            section
+            for section in sections
+            if isinstance(section, dict) and section.get("is_default") is True
+        ),
+        None,
+    )
+    if default_section is None:
+        raise BootstrapError("Feishu tasklist missing default unnamed section")
+
+    print_status("ok", f"section: Backlog uses default section {default_section.get('guid', '<unknown>')}")
+
+    sections_by_name = {
+        section.get("name", ""): section
+        for section in sections
+        if isinstance(section, dict)
+    }
+
+    for section_name in REQUIRED_SECTIONS:
+        existing = sections_by_name.get(section_name)
+        if existing:
+            print_status("ok", f"section: {section_name} (existing)")
+            continue
+
+        payload = run_json(
+            [
+                "lark-cli",
+                "api",
+                "POST",
+                "/task/v2/sections",
+                "--as",
+                identity,
+                "--data",
+                json.dumps(
+                    {
+                        "resource_type": "tasklist",
+                        "resource_id": tasklist_guid,
+                        "name": section_name,
+                    }
+                ),
+            ]
+        )
+        created = payload.get("data", {}).get("section", {})
+        print_status("ok", f"section: {section_name} (created {created.get('guid', '<unknown>')})")
+
+
+def ensure_custom_fields(tasklist_guid: str, identity: str) -> None:
+    fields = list_custom_fields(tasklist_guid, identity)
+    fields_by_name = {
+        field.get("name"): field
+        for field in fields
+        if isinstance(field, dict) and isinstance(field.get("name"), str)
+    }
+
+    for field_name in REQUIRED_TEXT_FIELDS:
+        existing = fields_by_name.get(field_name)
+        if existing:
+            if existing.get("type") != "text":
+                raise BootstrapError(
+                    f"field {field_name!r} exists but is type {existing.get('type')!r}, expected 'text'"
+                )
+            print_status("ok", f"field: {field_name} (existing)")
+            continue
+
+        payload = run_json(
+            [
+                "lark-cli",
+                "api",
+                "POST",
+                "/task/v2/custom_fields",
+                "--as",
+                identity,
+                "--data",
+                json.dumps(
+                    {
+                        "resource_type": "tasklist",
+                        "resource_id": tasklist_guid,
+                        "name": field_name,
+                        "type": "text",
+                        "text_setting": {},
+                    }
+                ),
+            ]
+        )
+        created = payload.get("data", {}).get("custom_field", {})
+        print_status("ok", f"field: {field_name} (created {created.get('guid', '<unknown>')})")
+
+    existing = fields_by_name.get("Task Kind")
+    if existing:
+        if existing.get("type") != "single_select":
+            raise BootstrapError(
+                f"field 'Task Kind' exists but is type {existing.get('type')!r}, expected 'single_select'"
+            )
+
+        existing_options = existing.get("single_select_setting", {}).get("options", [])
+        existing_names = {item.get("name") for item in existing_options}
+        missing = [option["name"] for option in TASK_KIND_OPTIONS if option["name"] not in existing_names]
+        if missing:
+            print_status("warn", "field: Task Kind exists but is missing options: " + ", ".join(missing))
+        else:
+            print_status("ok", "field: Task Kind (existing)")
+        return
+
+    payload = run_json(
+        [
+            "lark-cli",
+            "api",
+            "POST",
+            "/task/v2/custom_fields",
+            "--as",
+            identity,
+            "--data",
+            json.dumps(
+                {
+                    "resource_type": "tasklist",
+                    "resource_id": tasklist_guid,
+                    "name": "Task Kind",
+                    "type": "single_select",
+                    "single_select_setting": {"options": TASK_KIND_OPTIONS},
+                }
+            ),
+        ]
+    )
+    created = payload.get("data", {}).get("custom_field", {})
+    print_status("ok", f"field: Task Kind (created {created.get('guid', '<unknown>')})")
+
+
+def list_sections(tasklist_guid: str, identity: str) -> list[dict]:
+    payload = run_json(
+        [
+            "lark-cli",
+            "api",
+            "GET",
+            "/task/v2/sections",
+            "--as",
+            identity,
+            "--params",
+            json.dumps({"resource_type": "tasklist", "resource_id": tasklist_guid}),
+        ]
+    )
+    return payload.get("data", {}).get("items", [])
+
+
+def list_custom_fields(tasklist_guid: str, identity: str) -> list[dict]:
+    payload = run_json(
+        [
+            "lark-cli",
+            "api",
+            "GET",
+            "/task/v2/custom_fields",
+            "--as",
+            identity,
+            "--params",
+            json.dumps({"resource_type": "tasklist", "resource_id": tasklist_guid}),
+        ]
+    )
+    return payload.get("data", {}).get("items", [])
+
+
+def run_json(args: list[str]) -> dict:
+    output = run_raw(args)
+    payload_text = extract_json_payload(output)
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise BootstrapError(f"invalid JSON from {' '.join(args)}: {exc}") from exc
+
+    if isinstance(payload, dict) and payload.get("code") not in (None, 0):
+        raise BootstrapError(
+            f"lark-cli call failed for {' '.join(args)}: code={payload.get('code')} msg={payload.get('msg')}"
+        )
+    return payload
+
+
+def run_raw(args: list[str]) -> str:
+    try:
+        completed = subprocess.run(args, check=False, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise BootstrapError(f"command not found: {args[0]}") from exc
+
+    output = completed.stdout if completed.stdout.strip() else completed.stderr
+    if completed.returncode != 0:
+        raise BootstrapError(
+            f"command failed ({completed.returncode}): {' '.join(args)}\n{output.strip()}"
+        )
+    return output
+
+
+def extract_json_payload(output: str) -> str:
+    trimmed = output.strip()
+    index = trimmed.find("{")
+    if index < 0:
+        return trimmed
+    return trimmed[index:]
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except BootstrapError as exc:
+        print_status("fail", str(exc))
+        sys.exit(1)

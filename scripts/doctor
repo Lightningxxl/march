@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TARGET_REPO_INPUT="${1:-${MARCH_TARGET_REPO:-}}"
+
+check_cmd() {
+  local cmd="$1"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    echo "ok   command: $cmd"
+  else
+    echo "fail command: $cmd"
+    return 1
+  fi
+}
+
+status=0
+
+check_cmd mise || status=1
+check_cmd git || status=1
+check_cmd lark-cli || status=1
+check_cmd python3 || status=1
+
+if [[ $status -eq 0 ]]; then
+  if "$ROOT_DIR/scripts/feishu-bootstrap" --check-only; then
+    :
+  else
+    status=1
+  fi
+fi
+
+if [[ -n "$TARGET_REPO_INPUT" ]]; then
+  if [[ -d "$TARGET_REPO_INPUT" ]]; then
+    TARGET_REPO="$(cd "$TARGET_REPO_INPUT" && pwd)"
+    echo "ok   repo: $TARGET_REPO"
+
+    for required_file in MARCH.yml PLANNER.md BUILDER.md AUDITOR.md; do
+      if [[ -f "$TARGET_REPO/$required_file" ]]; then
+        echo "ok   file: $required_file"
+      else
+        echo "fail file: $TARGET_REPO/$required_file"
+        status=1
+      fi
+    done
+  else
+    echo "fail repo: $TARGET_REPO_INPUT"
+    status=1
+  fi
+else
+  echo "warn repo: no target repo provided"
+fi
+
+if [[ $status -eq 0 ]]; then
+  echo "March doctor: healthy"
+else
+  echo "March doctor: issues found"
+fi
+
+exit "$status"
