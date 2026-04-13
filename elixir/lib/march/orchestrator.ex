@@ -923,6 +923,7 @@ defmodule March.Orchestrator do
       case Task.Supervisor.start_child(March.TaskSupervisor, runner) do
         {:ok, pid} ->
           ref = Process.monitor(pid)
+          run_mode = dispatch_mode_for_issue(role, issue, runner_opts)
 
           Logger.info("Dispatching issue to #{role} lane: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
@@ -932,6 +933,7 @@ defmodule March.Orchestrator do
               ref: ref,
               identifier: issue.identifier,
               role: role,
+              mode: run_mode,
               issue: issue,
               session_id: nil,
               last_codex_message: nil,
@@ -1012,6 +1014,16 @@ defmodule March.Orchestrator do
   defp prepare_issue_for_dispatch(%Issue{} = issue, _role, attempt) do
     {:ok, issue, [attempt: attempt]}
   end
+
+  defp dispatch_mode_for_issue(:builder, %Issue{} = issue, runner_opts) do
+    Keyword.get(runner_opts, :mode, TaskState.builder_mode(issue))
+  end
+
+  defp dispatch_mode_for_issue(:planner, %Issue{} = issue, runner_opts) do
+    Keyword.get(runner_opts, :mode, TaskState.planner_mode(issue))
+  end
+
+  defp dispatch_mode_for_issue(_role, _issue, _runner_opts), do: nil
 
   defp maybe_sync_building_hook(%Issue{} = issue, role, phase) when is_binary(phase) do
     desired_extra =
@@ -1605,10 +1617,9 @@ defmodule March.Orchestrator do
 
   defp maybe_sync_canonical_repo_after_merge(
          %State{} = state,
-         %{issue: %Issue{state: state_name, identifier: identifier}}
-       )
-       when is_binary(state_name) do
-    if normalize_issue_state(state_name) == "merging" do
+         %{issue: %Issue{identifier: identifier}} = running_entry
+       ) do
+    if merge_sync_run?(running_entry) do
       repo_root = Workflow.repo_root()
       canonical_branch = Config.canonical_branch()
       checking_status = repo_sync_status(:merge, :checking, repo_root, nil)
@@ -1634,6 +1645,17 @@ defmodule March.Orchestrator do
   end
 
   defp maybe_sync_canonical_repo_after_merge(%State{} = state, _running_entry), do: state
+
+  @doc false
+  @spec merge_sync_run?(map()) :: boolean()
+  def merge_sync_run?(%{role: :builder, mode: "merge"}), do: true
+
+  def merge_sync_run?(%{role: :builder, issue: %Issue{state: state_name}})
+      when is_binary(state_name) do
+    normalize_issue_state(state_name) == "merging"
+  end
+
+  def merge_sync_run?(_running_entry), do: false
 
   defp set_repo_sync_status(%State{} = state, status) when is_map(status) do
     Application.put_env(:march, :last_repo_sync_status, status)

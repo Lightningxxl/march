@@ -302,18 +302,11 @@ defmodule March.StatusDashboard do
 
   defp snapshot_with_samples(token_samples, now_ms) do
     case snapshot_payload() do
-      {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+      {:ok, %{codex_totals: codex_totals} = snapshot} ->
         total_tokens = Map.get(codex_totals, :total_tokens, 0)
 
         {
-          {:ok,
-           %{
-             running: running,
-             retrying: retrying,
-             codex_totals: codex_totals,
-             rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
-           }},
+          {:ok, snapshot_for_render(snapshot)},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
 
@@ -651,6 +644,10 @@ defmodule March.StatusDashboard do
   def format_snapshot_content_for_test(snapshot_data, tps, terminal_columns),
     do: format_snapshot_content(snapshot_data, tps, terminal_columns)
 
+  @doc false
+  @spec snapshot_for_render_for_test(map()) :: map()
+  def snapshot_for_render_for_test(snapshot), do: snapshot_for_render(snapshot)
+
   defp snapshot_payload do
     if Process.whereis(Orchestrator) do
       case Orchestrator.snapshot() do
@@ -676,6 +673,18 @@ defmodule March.StatusDashboard do
     else
       :error
     end
+  end
+
+  defp snapshot_for_render(%{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot)
+       when is_list(running) and is_list(retrying) and is_map(codex_totals) do
+    %{
+      running: running,
+      retrying: retrying,
+      codex_totals: codex_totals,
+      rate_limits: Map.get(snapshot, :rate_limits),
+      polling: Map.get(snapshot, :polling),
+      repo_sync: Map.get(snapshot, :repo_sync)
+    }
   end
 
   defp format_running_rows(running, running_event_width) do
