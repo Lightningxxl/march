@@ -1,9 +1,9 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer
+.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer verify
 
 MIX ?= mix
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, ci"
+	@echo "Targets: setup, deps, build, fmt, fmt-check, lint, test, coverage, dialyzer, verify, ci, all"
 
 setup:
 	$(MIX) setup
@@ -33,12 +33,12 @@ dialyzer:
 	$(MIX) deps.get
 	$(MIX) dialyzer --format short
 
-ci:
+verify:
 	$(MAKE) setup
 	$(MAKE) build
 	$(MAKE) fmt-check
-	$(MAKE) lint
-	$(MAKE) coverage
-	$(MAKE) dialyzer
+	$(MAKE) test
 
-all: ci
+ci: verify
+
+all: verify

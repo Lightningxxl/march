@@ -216,6 +216,7 @@ defmodule March.Workspace do
 
   defp hook_env(_issue_context) do
     [
+      {"MARCH_CANONICAL_BRANCH", Config.canonical_branch()},
       {"SYMPHONY_CANONICAL_BRANCH", Config.canonical_branch()}
     ]
   end

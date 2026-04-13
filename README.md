@@ -1,11 +1,19 @@
 # March
 
+[中文 README](./README.zh-CN.md)
+
 Multi-lane coding orchestration for Feishu task workflows.
 
-March is a Feishu-native orchestration system for planner, builder, and auditor agent workflows.
-It is built for real repositories, long-running tasks, isolated workspaces, and
-human-in-the-loop delivery through Feishu task comments, stages, and canonical
-artifacts.
+March is a Feishu-native orchestration system for planner, builder, and auditor
+agent workflows.
+
+It combines OpenAI's repo-as-harness harness engineering approach with the
+long-running multi-agent collaboration practices popularized by Claude Code, and
+lands those ideas on a single Feishu task surface.
+
+March works best on repositories that already follow harness-engineering
+discipline: the repo owns project truth, docs, and validation paths, while
+March owns lifecycle orchestration, workspaces, and Feishu task state.
 
 ## What March Is
 
@@ -126,9 +134,10 @@ March is TUI-only. There is no web dashboard in this repo.
 
 For a minimal starter profile, see [`examples/minimal`](./examples/minimal).
 
-## Developer Tooling
+## Codex Setup
 
-This repo includes Codex-oriented helper skills under `.codex/`:
+If you run March with Codex, make the bundled skills available to your Codex
+installation. The canonical copies live in this repo under `.codex/skills/`:
 
 - `feishu-task-ops`
 - `pull`
@@ -137,17 +146,32 @@ This repo includes Codex-oriented helper skills under `.codex/`:
 - `debug`
 - `commit`
 
-It also includes `.codex/worktree_init.sh` for repo-local worktree setup.
+Some Codex setups auto-load repo-local skills. If yours does not, copy or
+symlink these skills into `$CODEX_HOME/skills` before using March.
+
+For the exact install steps and the optional worktree bootstrap helper, see
+[Codex Setup](./docs/codex-setup.md).
 
 ## Docs
 
 - [Docs Index](./docs/index.md)
+- [Codex Setup](./docs/codex-setup.md)
 - [Feishu Setup](./docs/feishu-setup.md)
 - [Harness Engineering Share](./docs/harness-engineering-share.md)
 
 ## Acknowledgements
 
-March draws on ideas from OpenAI Symphony and the broader harness-engineering approach to long-running agent systems.
+March draws on ideas from OpenAI Symphony and the broader harness-engineering
+approach to long-running agent systems.
+
+- OpenAI, Harness Engineering:
+  https://openai.com/index/harness-engineering/
+- OpenAI, Unrolling the Codex agent loop:
+  https://openai.com/index/unrolling-the-codex-agent-loop/
+- Anthropic, Harness design for long-running application development:
+  https://www.anthropic.com/engineering/harness-design-long-running-apps
+- Anthropic, Managed agents:
+  https://www.anthropic.com/engineering/managed-agents
 
 ## License
 

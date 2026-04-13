@@ -24,6 +24,7 @@ description:
      - the PR base branch if one exists
      - otherwise `main`
    - Determine the merge source remote in this order:
+     - `march-source/<base>` if the `march-source` remote exists
      - `symphony-source/<base>` if the `symphony-source` remote exists
      - otherwise `origin/<base>`
 4. Fetch latest refs:
@@ -38,7 +39,7 @@ description:
 7. If conflicts appear, resolve them (see conflict guidance below), then:
    - `git add <files>`
    - `git commit` (or `git merge --continue` if the merge is paused)
-8. Verify with project checks (follow repo policy in `AGENTS.md`).
+8. Verify with project checks (follow repo policy in `README.md` and repo docs).
 9. Summarize the merge:
    - Call out the most challenging conflicts/files and how they were resolved.
    - Note any assumptions or follow-ups.

@@ -4,6 +4,7 @@ Start here if you want to understand or run March.
 
 ## Core Docs
 
+- [Codex Setup](./codex-setup.md): how to install the bundled Codex skills March expects
 - [Feishu Setup](./feishu-setup.md): expected Feishu tasklist structure and fields
 - [Harness Engineering Share](./harness-engineering-share.md): the design story behind March, Feishu-native workflow, and repo-as-harness thinking
 
