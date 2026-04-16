@@ -84,13 +84,14 @@ defmodule March.PromptBuilder do
     end
   end
 
-  defp ticket_snapshot_suffix(issue, nil, role), do: runtime_contract_suffix() <> task_operations_suffix(issue, role)
+  defp ticket_snapshot_suffix(issue, nil, role),
+    do: runtime_contract_suffix(role, nil) <> task_operations_suffix(issue, role, nil)
 
   defp ticket_snapshot_suffix(issue, ticket, role) when is_map(ticket) do
     sections =
       [
         "",
-        runtime_contract_suffix(),
+        runtime_contract_suffix(role, ticket),
         "## Feishu Task Snapshot",
         "- active_role: #{role}",
         render_scalar_line("mode", Map.get(ticket, :mode) || Map.get(ticket, "mode")),
@@ -111,11 +112,11 @@ defmodule March.PromptBuilder do
       ]
       |> Enum.reject(&(&1 in [nil, ""]))
 
-    "\n" <> Enum.join(sections, "\n") <> task_operations_suffix(issue, role)
+    "\n" <> Enum.join(sections, "\n") <> task_operations_suffix(issue, role, ticket)
   end
 
-  defp runtime_contract_suffix do
-    """
+  defp runtime_contract_suffix(role, ticket) do
+    base_contract = """
     ## Runtime Contract
     - The runtime already fetched the current task description, current custom-field values, and the current task comment thread for this turn.
     - Treat the appended task snapshot as the authoritative live task state for this turn.
@@ -124,9 +125,47 @@ defmodule March.PromptBuilder do
     - Use the exact commands in `## Feishu Task Operations` only when you need a required task mutation or a required re-read.
     """
     |> String.trim()
+
+    case builder_workpad_contract(role, ticket) do
+      nil -> base_contract
+      contract -> base_contract <> "\n" <> contract
+    end
   end
 
-  defp task_operations_suffix(issue, _role) when is_map(issue) do
+  defp builder_workpad_contract(:builder, ticket) when is_map(ticket) do
+    attempt = Map.get(ticket, :attempt) || Map.get(ticket, "attempt")
+    builder_workpad = Map.get(ticket, :builder_workpad) || Map.get(ticket, "builder_workpad")
+    turn_phase = Map.get(ticket, :turn_phase) || Map.get(ticket, "turn_phase")
+    mode = Map.get(ticket, :mode) || Map.get(ticket, "mode")
+
+    recovery_notice =
+      if builder_retry_or_continuation?(attempt, turn_phase, mode) and present_text?(builder_workpad) do
+        """
+        ## Builder Restart Recovery
+        - This builder turn is a retry/restart or continuation with an existing workpad snapshot.
+        - Resume from the current workpad. Do not replace it wholesale unless it is clearly empty or corrupted.
+        - If you normalize the format, preserve completed and already-verified progress; rewrite only the minimal sections that changed.
+        """
+        |> String.trim()
+      end
+
+    [recovery_notice,
+     """
+     ## Builder Workpad Contract
+     - Treat `Current Builder Workpad` as the canonical durable builder state for this task.
+     - If `Current Builder Workpad` is non-empty, continue from it instead of regenerating it from scratch.
+     - Preserve completed items and prior notes. Prefer appending deltas or updating only the changed status and next-step lines.
+     - Before patching `Builder Workpad` after a long run, a retry, or right before a stage transition, use `Read Task Custom Fields` to re-read the latest remote value and merge with it if it changed.
+     - Do not wipe the workpad just to restate the same plan in different words.
+     """
+     |> String.trim()]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n")
+  end
+
+  defp builder_workpad_contract(_role, _ticket), do: nil
+
+  defp task_operations_suffix(issue, role, ticket) when is_map(issue) do
     task_guid = Map.get(issue, :id) || Map.get(issue, "id")
     tasklist_guid = Map.get(issue, :tasklist_guid) || Map.get(issue, "tasklist_guid")
     field_guids = Map.get(issue, :task_custom_field_guids) || Map.get(issue, "task_custom_field_guids") || %{}
@@ -159,6 +198,7 @@ defmodule March.PromptBuilder do
           lark-cli api GET /task/v2/custom_fields --as user --params '{"resource_type":"tasklist","resource_id":"#{tasklist_guid}"}'
           """)
         ),
+        render_named_block("Builder Workpad Update Guidance", render_builder_workpad_update_guidance(role, ticket)),
         render_named_block(
           "Patch Task Custom Fields",
           render_shell_command("""
@@ -206,7 +246,25 @@ defmodule March.PromptBuilder do
     "\n" <> Enum.join(blocks, "\n")
   end
 
-  defp task_operations_suffix(_issue, _role), do: ""
+  defp task_operations_suffix(_issue, _role, _ticket), do: ""
+
+  defp render_builder_workpad_update_guidance(:builder, ticket) when is_map(ticket) do
+    attempt = Map.get(ticket, :attempt) || Map.get(ticket, "attempt")
+    turn_phase = Map.get(ticket, :turn_phase) || Map.get(ticket, "turn_phase")
+    mode = Map.get(ticket, :mode) || Map.get(ticket, "mode")
+
+    [
+      "Use `Patch Task Custom Fields` for `Builder Workpad` only after you have compared against the latest remote field value.",
+      "Prefer small in-place updates: mark completed checklist items, append a short milestone note, or refresh only `Current Status` / `Next Step`.",
+      if(builder_retry_or_continuation?(attempt, turn_phase, mode),
+        do: "This turn is not a fresh pickup. Preserve the existing workpad and continue it instead of rewriting the whole field."
+      )
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp render_builder_workpad_update_guidance(_role, _ticket), do: nil
 
   defp render_named_block(_title, nil), do: nil
 
@@ -268,6 +326,13 @@ defmodule March.PromptBuilder do
   end
 
   defp render_scalar_line(label, value) when is_integer(value), do: "- #{label}: #{value}"
+
+  defp builder_retry_or_continuation?(attempt, turn_phase, mode) do
+    (is_integer(attempt) and attempt > 1) or turn_phase == "continuation" or mode in ["rework", "merge"]
+  end
+
+  defp present_text?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present_text?(_value), do: false
 
   defp render_task_kind_commands(_task_guid, nil, _task_kind_option_guids), do: nil
 
