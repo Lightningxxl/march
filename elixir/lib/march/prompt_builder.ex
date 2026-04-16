@@ -116,15 +116,16 @@ defmodule March.PromptBuilder do
   end
 
   defp runtime_contract_suffix(role, ticket) do
-    base_contract = """
-    ## Runtime Contract
-    - The runtime already fetched the current task description, current custom-field values, and the current task comment thread for this turn.
-    - Treat the appended task snapshot as the authoritative live task state for this turn.
-    - If `Recent Task Discussion` is absent, treat the current discussion thread as empty.
-    - Do not run CLI discovery commands such as `lark-cli --help`, `lark-cli api --help`, `lark-cli schema`, or shell completion probes.
-    - Use the exact commands in `## Feishu Task Operations` only when you need a required task mutation or a required re-read.
-    """
-    |> String.trim()
+    base_contract =
+      """
+      ## Runtime Contract
+      - The runtime already fetched the current task description, current custom-field values, and the current task comment thread for this turn.
+      - Treat the appended task snapshot as the authoritative live task state for this turn.
+      - If `Recent Task Discussion` is absent, treat the current discussion thread as empty.
+      - Do not run CLI discovery commands such as `lark-cli --help`, `lark-cli api --help`, `lark-cli schema`, or shell completion probes.
+      - Use the exact commands in `## Feishu Task Operations` only when you need a required task mutation or a required re-read.
+      """
+      |> String.trim()
 
     case builder_workpad_contract(role, ticket) do
       nil -> base_contract
@@ -149,16 +150,18 @@ defmodule March.PromptBuilder do
         |> String.trim()
       end
 
-    [recovery_notice,
-     """
-     ## Builder Workpad Contract
-     - Treat `Current Builder Workpad` as the canonical durable builder state for this task.
-     - If `Current Builder Workpad` is non-empty, continue from it instead of regenerating it from scratch.
-     - Preserve completed items and prior notes. Prefer appending deltas or updating only the changed status and next-step lines.
-     - Before patching `Builder Workpad` after a long run, a retry, or right before a stage transition, use `Read Task Custom Fields` to re-read the latest remote value and merge with it if it changed.
-     - Do not wipe the workpad just to restate the same plan in different words.
-     """
-     |> String.trim()]
+    [
+      recovery_notice,
+      """
+      ## Builder Workpad Contract
+      - Treat `Current Builder Workpad` as the canonical durable builder state for this task.
+      - If `Current Builder Workpad` is non-empty, continue from it instead of regenerating it from scratch.
+      - Preserve completed items and prior notes. Prefer appending deltas or updating only the changed status and next-step lines.
+      - Before patching `Builder Workpad` after a long run, a retry, or right before a stage transition, use `Read Task Custom Fields` to re-read the latest remote value and merge with it if it changed.
+      - Do not wipe the workpad just to restate the same plan in different words.
+      """
+      |> String.trim()
+    ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")
   end
