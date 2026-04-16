@@ -10,6 +10,7 @@ Use this skill when the job is to operate Feishu Task objects through `lark-cli`
 This skill is for:
 - creating and inspecting tasklists
 - creating, reading, and patching tasks
+- deleting or cleaning tasks and tasklists after exact candidate selection
 - writing and reading task comments
 - creating and reading task custom fields
 - creating and reading task sections/groups
@@ -44,8 +45,10 @@ lark-cli auth status
 For task workflows, the important scopes are usually:
 - `task:task:read`
 - `task:task:write`
+- `task:task:delete`
 - `task:tasklist:read`
 - `task:tasklist:write`
+- `task:tasklist:delete`
 - `task:comment:read`
 - `task:comment:write`
 - `task:custom_field:read`
@@ -64,11 +67,36 @@ If scopes were just granted in the Feishu app backend, re-run device auth to ref
 5. Create or patch tasks.
 6. Route tasks into the correct section with `add_tasklist`.
 
+## Destructive Ops
+
+Treat delete/remove/archive requests as dangerous operations.
+
+- use a read-then-mutate flow: inspect first, mutate second
+- for board-scoped cleanup, prefer `lark-cli task tasklists tasks` over `lark-cli task tasks list`
+- use `task.tasks.list` only for "my tasks" style requests; it is not the right primitive for precise cleanup inside a specific tasklist
+- narrow delete candidates in this order whenever possible:
+  - target `tasklist_guid`
+  - target `section_guid` or default backlog section when the request is board-column scoped
+  - `completed` state
+  - exact summary/description/custom-field match
+  - final explicit `task_guid` set
+- do not bulk delete from a vague keyword alone such as "delete test tasks" without first enumerating exact matches
+- if the user says `clean up`, `close`, or `clear` but does not explicitly require deletion, prefer non-destructive cleanup first:
+  - patch `completed_at`
+  - move tasks into a holding section such as `Done` or `Backlog`
+- require user confirmation before delete when:
+  - the candidate set spans multiple tasklists
+  - the filter is not easily explainable in one sentence
+  - non-completed tasks would be removed unexpectedly
+  - more than 5 tasks would be deleted
+- after destructive actions, report the exact deleted objects using `task_guid` plus summary
+
 ## Important API Notes
 
 - `task.extra` is an opaque string, not a JSON object. If you use it, serialize JSON yourself.
 - `tasks.patch` supports `custom_fields`, but does **not** support moving tasks between tasklist sections.
 - `lark-cli task tasks create --data @file` may fail with `invalid JSON format`; prefer inline JSON or `jq -n` command substitution.
+- local `lark-cli` supports `task tasks delete` and `task tasklists delete`, even though some official plugin tool surfaces only document create/get/list/patch flows.
 - In `tasks.create`, `tasklists` entries use `tasklist_guid`, not `guid`.
 - To place a task into a section, use:
   - `POST /task/v2/tasks/{task_guid}/add_tasklist`
@@ -82,8 +110,10 @@ If scopes were just granted in the Feishu app backend, re-run device auth to ref
 Read [references/commands.md](references/commands.md) when you need concrete `lark-cli` commands or raw API payloads for:
 - auth refresh
 - tasklist creation
-- task create/get/patch
+- task create/get/patch/delete
+- tasklist delete and member removal
 - comments
 - custom fields
 - sections/groups
 - section assignment
+- destructive dry-run and exact-match cleanup patterns
