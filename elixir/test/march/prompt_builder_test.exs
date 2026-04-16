@@ -88,6 +88,42 @@ defmodule March.PromptBuilderTest do
     assert prompt =~ "Do not invent alternate task comment endpoints."
   end
 
+  test "builder prompt includes restart-safe workpad guidance on retry" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "mode={{ mode }}")
+
+    prompt =
+      PromptBuilder.build_prompt(
+        %Issue{
+          id: "task-456",
+          identifier: "TASK-456",
+          state: "Building",
+          tasklist_guid: "tasklist-456",
+          extra: nil,
+          task_custom_field_guids: %{
+            "Builder Workpad" => "field-workpad"
+          }
+        },
+        mode: "execute",
+        turn_phase: "continuation",
+        turn_number: 2,
+        max_turns: 6,
+        attempt: 2,
+        ticket: %{
+          attempt: 2,
+          turn_phase: "continuation",
+          mode: "execute",
+          builder_workpad: "### Progress\n- [x] migrated routes\n- [ ] rerun e2e"
+        }
+      )
+
+    assert prompt =~ "## Builder Restart Recovery"
+    assert prompt =~ "Resume from the current workpad. Do not replace it wholesale"
+    assert prompt =~ "## Builder Workpad Contract"
+    assert prompt =~ "continue from it instead of regenerating it from scratch"
+    assert prompt =~ "### Builder Workpad Update Guidance"
+    assert prompt =~ "This turn is not a fresh pickup."
+  end
+
   test "auditor prompt exposes re-audit mode to the template" do
     write_workflow_file!(Workflow.workflow_file_path(),
       auditor_prompt: """

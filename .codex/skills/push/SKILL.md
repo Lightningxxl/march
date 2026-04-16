@@ -31,8 +31,8 @@ description:
    remote URL is already configured.
 4. If push is not clean/rejected:
    - If the failure is a non-fast-forward or sync problem, run the `pull`
-     skill to merge the canonical base branch, resolve conflicts, and rerun
-     validation.
+     skill to merge the detected canonical base branch, resolve conflicts, and
+     rerun validation.
    - Push again; use `--force-with-lease` only when history was rewritten.
    - If the failure is due to auth, permissions, or workflow restrictions on
      the configured remote, stop and surface the exact error instead of
@@ -62,6 +62,18 @@ description:
 # Identify branch
 branch=$(git branch --show-current)
 
+# Detect canonical base branch
+base_branch=$(
+  if [ -f .march/canonical-source-ref ]; then
+    cat .march/canonical-source-ref
+  elif [ -f .symphony/canonical-source-ref ]; then
+    cat .symphony/canonical-source-ref
+  else
+    gh pr view --json baseRefName -q .baseRefName 2>/dev/null || true
+  fi
+)
+base_branch=${base_branch:-main}
+
 # Minimal validation gate
 make -C elixir all
 
@@ -88,10 +100,10 @@ fi
 # Write a clear, human-friendly title that summarizes the shipped change.
 pr_title="<clear PR title written for this change>"
 if [ -z "$pr_state" ]; then
-  gh pr create --title "$pr_title"
+  gh pr create --base "$base_branch" --title "$pr_title"
 else
-  # Reconsider title on every branch update; edit if scope shifted.
-  gh pr edit --title "$pr_title"
+  # Reconsider title and base on every branch update; edit if scope shifted.
+  gh pr edit --base "$base_branch" --title "$pr_title"
 fi
 
 # Write/edit PR body to match .github/pull_request_template.md before validation.
