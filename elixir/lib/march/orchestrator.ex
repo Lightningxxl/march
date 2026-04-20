@@ -1596,8 +1596,8 @@ defmodule March.Orchestrator do
 
   defp maybe_record_role_progress(%{issue: %Issue{id: issue_id}} = running_entry, role)
        when is_binary(issue_id) and role in [:planner, :auditor] do
-    with {:ok, [%Issue{} = refreshed_issue | _]} <- Tracker.fetch_issue_states_by_ids([issue_id]),
-         extra <- TaskState.mark_role_processed(refreshed_issue, role),
+    with {:ok, %Issue{} = progress_issue} <- role_progress_issue(running_entry, role, &Tracker.fetch_issue_states_by_ids/1),
+         extra <- TaskState.mark_role_processed(progress_issue, role),
          :ok <- Tracker.update_issue_extra(issue_id, extra) do
       :ok
     else
@@ -1614,6 +1614,36 @@ defmodule March.Orchestrator do
   end
 
   defp maybe_record_role_progress(_running_entry, _role), do: :ok
+
+  defp role_progress_issue(%{issue: %Issue{} = issue}, :planner, fetcher)
+       when is_function(fetcher, 1) do
+    if normalize_issue_state(issue.state) == "planning" do
+      {:ok, issue}
+    else
+      fetch_role_progress_issue(issue.id, fetcher)
+    end
+  end
+
+  defp role_progress_issue(%{issue: %Issue{id: issue_id}}, role, fetcher)
+       when is_binary(issue_id) and role in [:planner, :auditor] and is_function(fetcher, 1) do
+    fetch_role_progress_issue(issue_id, fetcher)
+  end
+
+  defp role_progress_issue(_running_entry, _role, _fetcher), do: {:error, :missing_issue}
+
+  defp fetch_role_progress_issue(issue_id, fetcher)
+       when is_binary(issue_id) and is_function(fetcher, 1) do
+    case fetcher.([issue_id]) do
+      {:ok, [%Issue{} = issue | _]} -> {:ok, issue}
+      {:ok, []} -> {:error, :issue_missing}
+      other -> other
+    end
+  end
+
+  @doc false
+  def role_progress_issue_for_test(running_entry, role, fetcher) when is_function(fetcher, 1) do
+    role_progress_issue(running_entry, role, fetcher)
+  end
 
   defp maybe_sync_canonical_repo_after_merge(
          %State{} = state,
