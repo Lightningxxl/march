@@ -552,6 +552,7 @@ defmodule March.Feishu.TaskAdapter do
     case normalize_state(stage_name) do
       "planning" -> true
       "building" -> true
+      "auditing" -> true
       _ -> false
     end
   end

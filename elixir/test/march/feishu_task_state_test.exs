@@ -89,6 +89,15 @@ defmodule March.FeishuTaskStateTest do
 
     changed_issue = %Issue{marked_issue | builder_workpad: "Workpad v2"}
     assert TaskState.auditor_pending?(changed_issue)
+
+    commented_issue = %Issue{
+      marked_issue
+      | comments: [
+          %{id: "human-1", content: "Please re-check the docker proof.", created_at: "1", updated_at: "1"}
+        ]
+    }
+
+    assert TaskState.auditor_pending?(commented_issue)
   end
 
   test "prompt context exposes human comments separately from agent comments" do

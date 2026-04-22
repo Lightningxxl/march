@@ -243,7 +243,15 @@ defmodule March.Feishu.TaskState do
 
   @spec auditor_fingerprint(Item.t()) :: String.t()
   def auditor_fingerprint(%Item{} = issue) do
-    sha256(join_inputs([issue.description, issue.task_kind, issue.current_plan, issue.builder_workpad]))
+    sha256(
+      join_inputs([
+        issue.description,
+        issue.task_kind,
+        issue.current_plan,
+        issue.builder_workpad,
+        comment_fingerprint(issue.comments || [])
+      ])
+    )
   end
 
   defp default_state do

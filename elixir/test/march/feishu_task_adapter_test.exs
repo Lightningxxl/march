@@ -228,13 +228,13 @@ defmodule March.FeishuTaskAdapterTest do
     assert issue.identifier == "task-2"
   end
 
-  test "fetch_candidate_issues only fetches comments for planning and building tasks and skips failed tasks" do
+  test "fetch_candidate_issues fetches comments for planning, building, and auditing tasks and skips failed tasks" do
     FakeTaskClient.reset(fixtures_with_mixed_stages())
 
     assert {:ok, issues} = TaskAdapter.fetch_candidate_issues()
-    assert Enum.map(issues, & &1.id) == ["planning-1", "merging-1", "building-1"]
-    assert Enum.map(issues, & &1.state) == ["Planning", "Merging", "Building"]
-    assert MapSet.new(FakeTaskClient.calls(:list_comments)) == MapSet.new(["planning-1", "building-1"])
+    assert Enum.map(issues, & &1.id) == ["planning-1", "merging-1", "building-1", "auditing-1"]
+    assert Enum.map(issues, & &1.state) == ["Planning", "Merging", "Building", "Auditing"]
+    assert MapSet.new(FakeTaskClient.calls(:list_comments)) == MapSet.new(["planning-1", "building-1", "auditing-1"])
     refute "merging-1" in FakeTaskClient.calls(:list_comments)
     refute "broken-1" in Enum.map(issues, & &1.id)
   end
@@ -252,9 +252,9 @@ defmodule March.FeishuTaskAdapterTest do
   test "fetch_issue_states_by_ids also applies selective comment fetching" do
     FakeTaskClient.reset(fixtures_with_mixed_stages())
 
-    assert {:ok, issues} = TaskAdapter.fetch_issue_states_by_ids(["merging-1", "planning-1"])
-    assert Enum.map(issues, & &1.id) == ["merging-1", "planning-1"]
-    assert FakeTaskClient.calls(:list_comments) == ["planning-1"]
+    assert {:ok, issues} = TaskAdapter.fetch_issue_states_by_ids(["merging-1", "planning-1", "auditing-1"])
+    assert Enum.map(issues, & &1.id) == ["merging-1", "planning-1", "auditing-1"]
+    assert MapSet.new(FakeTaskClient.calls(:list_comments)) == MapSet.new(["planning-1", "auditing-1"])
   end
 
   test "planning comments use the short-lived issue cache to avoid duplicate reads within the same window" do
@@ -268,21 +268,22 @@ defmodule March.FeishuTaskAdapterTest do
     assert FakeTaskClient.count(:get_task) == 2
   end
 
-  test "comments are only required for planning and building stages" do
+  test "comments are required for stages where human feedback changes agent work" do
     assert TaskAdapter.comments_required_for_stage_for_test("Planning")
     assert TaskAdapter.comments_required_for_stage_for_test("Building")
+    assert TaskAdapter.comments_required_for_stage_for_test("Auditing")
     refute TaskAdapter.comments_required_for_stage_for_test("Merging")
-    refute TaskAdapter.comments_required_for_stage_for_test("Auditing")
     refute TaskAdapter.comments_required_for_stage_for_test("Backlog")
   end
 
   defp fixtures_with_mixed_stages do
     %{
-      task_guids: ["planning-1", "merging-1", "building-1", "broken-1"],
+      task_guids: ["planning-1", "merging-1", "building-1", "auditing-1", "broken-1"],
       task_errors: %{"broken-1" => :boom},
       sections: [
         %{"guid" => "planning-section", "name" => "Planning", "is_default" => false},
         %{"guid" => "building-section", "name" => "Building", "is_default" => false},
+        %{"guid" => "auditing-section", "name" => "Auditing", "is_default" => false},
         %{"guid" => "merging-section", "name" => "Merging", "is_default" => false}
       ],
       custom_fields: [
@@ -300,11 +301,13 @@ defmodule March.FeishuTaskAdapterTest do
       tasks: %{
         "planning-1" => fake_task("planning-1", "Planning", "planning-section"),
         "merging-1" => fake_task("merging-1", "Merging", "merging-section"),
-        "building-1" => fake_task("building-1", "Building", "building-section")
+        "building-1" => fake_task("building-1", "Building", "building-section"),
+        "auditing-1" => fake_task("auditing-1", "Auditing", "auditing-section")
       },
       comments: %{
         "planning-1" => [%{"id" => "cp", "content" => "Human: clarify plan", "created_at" => "1", "updated_at" => "1"}],
         "building-1" => [%{"id" => "cb", "content" => "Planner: rework required", "created_at" => "2", "updated_at" => "2"}],
+        "auditing-1" => [%{"id" => "ca", "content" => "Human: please re-audit", "created_at" => "3", "updated_at" => "3"}],
         "merging-1" => [%{"id" => "cm", "content" => "Should not be fetched", "created_at" => "3", "updated_at" => "3"}]
       }
     }
