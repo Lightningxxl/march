@@ -406,6 +406,31 @@ defmodule March.StatusDashboard do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)
   end
 
+  defp format_project_refresh_line(
+         %{
+           next_poll_in_ms: due_in_ms,
+           next_full_scan_in_ms: full_scan_due_in_ms,
+           hot_issue_count: hot_issue_count
+         } = polling
+       )
+       when is_integer(due_in_ms) and is_integer(full_scan_due_in_ms) and is_integer(hot_issue_count) do
+    due_in_ms = max(due_in_ms, 0)
+    full_scan_due_in_ms = max(full_scan_due_in_ms, 0)
+    seconds = div(due_in_ms + 999, 1000)
+    full_scan_seconds = div(full_scan_due_in_ms + 999, 1000)
+
+    full_scan_mode_suffix =
+      case Map.get(polling, :full_scan_mode) || Map.get(polling, "full_scan_mode") do
+        :idle -> " idle"
+        "idle" -> " idle"
+        _ -> ""
+      end
+
+    colorize("│ Next refresh: ", @ansi_bold) <>
+      colorize("#{seconds}s", @ansi_cyan) <>
+      colorize(" full=#{full_scan_seconds}s#{full_scan_mode_suffix} hot=#{hot_issue_count}", @ansi_dim)
+  end
+
   defp format_project_refresh_line(%{next_poll_in_ms: due_in_ms}) when is_integer(due_in_ms) do
     due_in_ms = max(due_in_ms, 0)
     seconds = div(due_in_ms + 999, 1000)
@@ -508,6 +533,15 @@ defmodule March.StatusDashboard do
   end
 
   defp render_poll_stats(stats) when is_map(stats) do
+    mode =
+      case Map.get(stats, :mode) || Map.get(stats, "mode") do
+        :full_scan -> "mode=full"
+        :hot_poll -> "mode=hot"
+        :full_scan_plus_hot -> "mode=full+hot"
+        value when is_binary(value) -> "mode=#{value}"
+        _ -> nil
+      end
+
     scanned = Map.get(stats, :scanned) || Map.get(stats, "scanned")
     loaded = Map.get(stats, :loaded) || Map.get(stats, "loaded")
     skipped = Map.get(stats, :skipped) || Map.get(stats, "skipped")
@@ -517,6 +551,7 @@ defmodule March.StatusDashboard do
 
     details =
       [
+        mode,
         if(is_integer(scanned), do: "tasks=#{scanned}"),
         if(is_integer(loaded), do: "loaded=#{loaded}"),
         if(is_integer(skipped), do: "skipped=#{skipped}"),

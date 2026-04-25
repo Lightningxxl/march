@@ -93,6 +93,13 @@ March 把 workflow surface 放在飞书里，同时把 source of truth 保留在
 - `AUDITOR.md`
 - `docs/index.md`
 
+运行语义补充：
+
+- March 从飞书里发现任务时，只扫描仍然是 `completed=false` 的 task。
+- `Planning`、`Building`、`Auditing` 是 comment-driven stage；`Human Review` 和 `Merging` 里的评论不会被自动轮询。
+- `Human Review` 是人工闸门。要恢复自动化处理，需要把 task 再移回 `Auditing`、`Building` 或 `Merging` 这样的自动化阶段。
+- `Merging` 是 builder 接管的 landing 模式。builder 把 task 落到 `Done` 之类 terminal stage 后，March 会顺手补上 completed 标记，让它从后续扫描里消失。
+
 ## 快速开始
 
 1. clone 本仓库。

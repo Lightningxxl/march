@@ -94,6 +94,13 @@ March keeps the workflow surface in Feishu, while repo-local files remain the so
 - `AUDITOR.md`
 - `docs/index.md`
 
+Operational notes:
+
+- March discovers work from Feishu tasks that are still `completed=false`.
+- `Planning`, `Building`, and `Auditing` are the comment-driven stages. Comments in `Human Review` and `Merging` are not polled automatically.
+- `Human Review` is a human gate. To resume automation, move the task back to an automation stage such as `Auditing`, `Building`, or `Merging`.
+- `Merging` is builder-owned landing mode. When builder lands a task and moves it into a terminal stage such as `Done`, March also marks it completed so it drops out of later scans.
+
 ## Quickstart
 
 1. Clone this repo.

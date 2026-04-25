@@ -43,19 +43,27 @@ defmodule March.Orchestrator do
 
     defstruct [
       :poll_interval_ms,
+      :full_scan_interval_ms,
+      :idle_full_scan_interval_ms,
+      :idle_after_empty_full_scans,
+      :consecutive_empty_full_scans,
+      :full_scan_mode,
       :max_concurrent_agents,
       :next_poll_due_at_ms,
+      :next_full_scan_due_at_ms,
       :poll_check_in_progress,
       :poll_task_ref,
       :poll_started_at,
       :poll_started_monotonic_ms,
       :last_poll_completed_at,
       :last_successful_poll_at,
+      :last_full_scan_at,
       :last_poll_duration_ms,
       :last_poll_status,
       :last_poll_stats,
       :last_repo_sync_status,
       running: %{},
+      hot_issue_ids: MapSet.new(),
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
@@ -76,14 +84,21 @@ defmodule March.Orchestrator do
 
     state = %State{
       poll_interval_ms: Config.poll_interval_ms(),
+      full_scan_interval_ms: Config.full_scan_interval_ms(),
+      idle_full_scan_interval_ms: Config.idle_full_scan_interval_ms(),
+      idle_after_empty_full_scans: Config.idle_after_empty_full_scans(),
+      consecutive_empty_full_scans: 0,
+      full_scan_mode: :active,
       max_concurrent_agents: Config.max_concurrent_agents(),
       next_poll_due_at_ms: now_ms,
+      next_full_scan_due_at_ms: now_ms,
       poll_check_in_progress: false,
       poll_task_ref: nil,
       poll_started_at: nil,
       poll_started_monotonic_ms: nil,
       last_poll_completed_at: nil,
       last_successful_poll_at: nil,
+      last_full_scan_at: nil,
       last_poll_duration_ms: nil,
       last_poll_status: nil,
       last_poll_stats: nil,
@@ -92,7 +107,7 @@ defmodule March.Orchestrator do
       codex_rate_limits: nil
     }
 
-    schedule_startup_terminal_workspace_cleanup()
+    schedule_startup_workspace_cleanup()
     log_routing_config()
     :ok = schedule_tick(0)
 
@@ -100,8 +115,8 @@ defmodule March.Orchestrator do
   end
 
   @impl true
-  def handle_info(:run_startup_terminal_workspace_cleanup, state) do
-    Task.start(fn -> run_terminal_workspace_cleanup() end)
+  def handle_info(:run_startup_workspace_cleanup, state) do
+    Task.start(fn -> run_startup_workspace_cleanup() end)
     {:noreply, state}
   end
 
@@ -281,44 +296,69 @@ defmodule March.Orchestrator do
   defp start_poll_task(%State{} = state), do: state
 
   defp run_poll_snapshot(%State{} = state) do
-    running_ids = Map.keys(state.running)
-
-    running_issues_result =
-      if running_ids == [] do
-        {:ok, []}
-      else
-        Tracker.fetch_issue_states_by_ids(running_ids)
-      end
-
-    validation_result = Config.validate!()
-
-    candidate_issues_result =
-      if available_slots(state) > 0 and validation_result == :ok do
-        Tracker.fetch_candidate_issues()
-      else
-        :skipped
-      end
-
-    {:ok,
-     %{
-       running_issues_result: running_issues_result,
-       validation_result: validation_result,
-       candidate_issues_result: candidate_issues_result
-     }}
+    run_poll_snapshot(state, Tracker, fn -> Config.validate!() end)
   rescue
     error -> {:error, {:poll_snapshot_failed, error, __STACKTRACE__}}
   catch
     kind, reason -> {:error, {:poll_snapshot_threw, kind, reason}}
   end
 
+  defp run_poll_snapshot(%State{} = state, tracker, validator)
+       when is_atom(tracker) and is_function(validator, 0) do
+    now_ms = System.monotonic_time(:millisecond)
+    reset_tracker_fetch_stats()
+    tracked_hot_issue_ids = tracked_hot_issue_ids(state)
+    validation_result = validator.()
+    full_scan_due? = full_scan_due?(state, now_ms)
+
+    {issues_result, full_scan_attempted?, authoritative_hot_issue_set?} =
+      if full_scan_due? do
+        case tracker.fetch_candidate_issues() do
+          {:ok, issues} ->
+            seen_issue_ids = issue_ids_set(issues)
+            leftover_hot_issue_ids = MapSet.difference(tracked_hot_issue_ids, seen_issue_ids)
+
+            case fetch_issues_by_ids(tracker, leftover_hot_issue_ids) do
+              {:ok, leftover_issues} ->
+                {{:ok, merge_issue_results(issues, leftover_issues)}, true, true}
+
+              {:error, reason} ->
+                Logger.debug("Failed to refresh leftover hot issues after full scan: #{inspect(reason)}")
+                {{:ok, issues}, true, true}
+            end
+
+          {:error, reason} ->
+            Logger.warning("Full tracker scan failed during poll: #{inspect(reason)}")
+            {fetch_issues_by_ids(tracker, tracked_hot_issue_ids), true, false}
+        end
+      else
+        {fetch_issues_by_ids(tracker, tracked_hot_issue_ids), false, false}
+      end
+
+    {:ok,
+     %{
+       validation_result: validation_result,
+       issues_result: issues_result,
+       tracked_hot_issue_ids: tracked_hot_issue_ids,
+       full_scan_attempted?: full_scan_attempted?,
+       authoritative_hot_issue_set?: authoritative_hot_issue_set?
+     }}
+  end
+
   defp finish_poll_cycle(%State{} = state, snapshot) when is_map(snapshot) do
     state =
       state
-      |> apply_running_issue_refresh(Map.get(snapshot, :running_issues_result, {:ok, []}))
+      |> apply_hot_issue_refresh(
+        Map.get(snapshot, :issues_result, {:ok, []}),
+        Map.get(snapshot, :tracked_hot_issue_ids, MapSet.new()),
+        Map.get(snapshot, :authoritative_hot_issue_set?, false)
+      )
+      |> apply_running_issue_refresh(Map.get(snapshot, :issues_result, {:ok, []}))
       |> apply_candidate_dispatch(
         Map.get(snapshot, :validation_result, {:error, :unknown_poll_validation}),
-        Map.get(snapshot, :candidate_issues_result, :skipped)
+        Map.get(snapshot, :issues_result, :skipped)
       )
+      |> reconcile_full_scan_cadence(Map.get(snapshot, :full_scan_attempted?, false))
 
     schedule_next_poll(%{
       state
@@ -340,8 +380,8 @@ defmodule March.Orchestrator do
       end
 
     stats =
-      case Application.get_env(:march, :last_feishu_candidate_fetch_stats) do
-        %{} = stats -> stats
+      case Application.get_env(:march, :last_feishu_tracker_fetch_stats) do
+        %{} = stats_by_mode -> summarize_tracker_fetch_stats(stats_by_mode)
         _ -> nil
       end
 
@@ -364,6 +404,125 @@ defmodule March.Orchestrator do
     %{state | next_poll_due_at_ms: next_poll_due_at_ms}
   end
 
+  defp reconcile_full_scan_cadence(%State{} = state, true) do
+    now_ms = System.monotonic_time(:millisecond)
+    idle_candidate? = idle_full_scan_candidate?(state)
+
+    consecutive_empty_full_scans =
+      if idle_candidate? do
+        state.consecutive_empty_full_scans + 1
+      else
+        0
+      end
+
+    full_scan_mode =
+      if consecutive_empty_full_scans >= state.idle_after_empty_full_scans do
+        :idle
+      else
+        :active
+      end
+
+    %{
+      state
+      | last_full_scan_at: DateTime.utc_now(),
+        next_full_scan_due_at_ms: now_ms + full_scan_interval_for_mode(state, full_scan_mode),
+        consecutive_empty_full_scans: consecutive_empty_full_scans,
+        full_scan_mode: full_scan_mode
+    }
+  end
+
+  defp reconcile_full_scan_cadence(%State{} = state, _full_scan_attempted?) do
+    cond do
+      idle_full_scan_candidate?(state) ->
+        state
+
+      state.full_scan_mode == :idle ->
+        wake_full_scan_cadence(state)
+
+      state.consecutive_empty_full_scans > 0 ->
+        %{state | consecutive_empty_full_scans: 0, full_scan_mode: :active}
+
+      true ->
+        %{state | full_scan_mode: :active}
+    end
+  end
+
+  defp wake_full_scan_cadence(%State{} = state) do
+    now_ms = System.monotonic_time(:millisecond)
+    next_due_at_ms = sooner_due_at_ms(state.next_full_scan_due_at_ms, now_ms + state.full_scan_interval_ms)
+
+    %{
+      state
+      | next_full_scan_due_at_ms: next_due_at_ms,
+        consecutive_empty_full_scans: 0,
+        full_scan_mode: :active
+    }
+  end
+
+  defp full_scan_interval_for_mode(%State{} = state, :idle) do
+    max(state.idle_full_scan_interval_ms, state.full_scan_interval_ms)
+  end
+
+  defp full_scan_interval_for_mode(%State{} = state, _mode), do: state.full_scan_interval_ms
+
+  defp idle_full_scan_candidate?(%State{} = state) do
+    map_size(state.running) == 0 and MapSet.size(state.hot_issue_ids) == 0 and
+      map_size(state.retry_attempts) == 0
+  end
+
+  defp sooner_due_at_ms(existing_due_at_ms, desired_due_at_ms)
+       when is_integer(existing_due_at_ms) and is_integer(desired_due_at_ms) do
+    min(existing_due_at_ms, desired_due_at_ms)
+  end
+
+  defp sooner_due_at_ms(_existing_due_at_ms, desired_due_at_ms), do: desired_due_at_ms
+
+  defp apply_hot_issue_refresh(
+         %State{} = state,
+         {:ok, issues},
+         tracked_hot_issue_ids,
+         authoritative_hot_issue_set?
+       )
+       when is_list(issues) do
+    seen_issue_ids = issue_ids_set(issues)
+
+    refreshed_hot_issue_ids =
+      issues
+      |> Enum.reduce(MapSet.new(), fn
+        %Issue{id: issue_id, state: state_name}, acc when is_binary(issue_id) ->
+          if hot_issue_state?(state_name) do
+            MapSet.put(acc, issue_id)
+          else
+            acc
+          end
+
+        _issue, acc ->
+          acc
+      end)
+
+    hot_issue_ids =
+      if authoritative_hot_issue_set? do
+        refreshed_hot_issue_ids
+      else
+        missing_hot_issue_ids =
+          tracked_hot_issue_ids
+          |> ensure_map_set()
+          |> MapSet.difference(seen_issue_ids)
+
+        MapSet.union(refreshed_hot_issue_ids, missing_hot_issue_ids)
+      end
+
+    %{state | hot_issue_ids: hot_issue_ids}
+  end
+
+  defp apply_hot_issue_refresh(%State{} = state, {:error, reason}, _tracked_hot_issue_ids, _authoritative_hot_issue_set?) do
+    Logger.debug("Failed to refresh hot issue set: #{inspect(reason)}; keeping previous hot issues")
+    state
+  end
+
+  defp apply_hot_issue_refresh(%State{} = state, _result, _tracked_hot_issue_ids, _authoritative_hot_issue_set?),
+    do: state
+
   defp apply_running_issue_refresh(%State{} = state, {:ok, issues}) when is_list(issues) do
     reconcile_running_issue_states(
       issues,
@@ -380,6 +539,105 @@ defmodule March.Orchestrator do
 
   defp apply_running_issue_refresh(%State{} = state, _result) do
     reconcile_stalled_running_issues(state)
+  end
+
+  defp fetch_issues_by_ids(tracker, issue_ids) when is_atom(tracker) do
+    if empty_issue_ids?(issue_ids) do
+      {:ok, []}
+    else
+      issue_ids
+      |> MapSet.to_list()
+      |> tracker.fetch_issue_states_by_ids()
+    end
+  end
+
+  defp tracked_hot_issue_ids(%State{} = state) do
+    state.hot_issue_ids
+    |> ensure_map_set()
+    |> MapSet.union(MapSet.new(Map.keys(state.running)))
+  end
+
+  defp full_scan_due?(%State{next_full_scan_due_at_ms: nil}, _now_ms), do: true
+
+  defp full_scan_due?(%State{next_full_scan_due_at_ms: due_at_ms}, now_ms)
+       when is_integer(due_at_ms) and is_integer(now_ms) do
+    due_at_ms <= now_ms
+  end
+
+  defp issue_ids_set(issues) when is_list(issues) do
+    issues
+    |> Enum.reduce(MapSet.new(), fn
+      %Issue{id: issue_id}, acc when is_binary(issue_id) -> MapSet.put(acc, issue_id)
+      _issue, acc -> acc
+    end)
+  end
+
+  defp merge_issue_results(primary_issues, secondary_issues)
+       when is_list(primary_issues) and is_list(secondary_issues) do
+    {merged, _seen_ids} =
+      Enum.reduce(primary_issues ++ secondary_issues, {[], MapSet.new()}, fn
+        %Issue{id: issue_id} = issue, {acc, seen_ids} when is_binary(issue_id) ->
+          if MapSet.member?(seen_ids, issue_id) do
+            {acc, seen_ids}
+          else
+            {[issue | acc], MapSet.put(seen_ids, issue_id)}
+          end
+
+        issue, {acc, seen_ids} ->
+          {[issue | acc], seen_ids}
+      end)
+
+    Enum.reverse(merged)
+  end
+
+  defp hot_issue_state?(state_name) when is_binary(state_name) do
+    MapSet.member?(automation_state_set(), normalize_issue_state(state_name))
+  end
+
+  defp hot_issue_state?(_state_name), do: false
+
+  defp ensure_map_set(%MapSet{} = value), do: value
+  defp ensure_map_set(list) when is_list(list), do: MapSet.new(list)
+  defp ensure_map_set(_value), do: MapSet.new()
+
+  defp empty_issue_ids?(%MapSet{} = issue_ids), do: MapSet.size(issue_ids) == 0
+  defp empty_issue_ids?(issue_ids) when is_list(issue_ids), do: issue_ids == []
+  defp empty_issue_ids?(_issue_ids), do: true
+
+  defp reset_tracker_fetch_stats do
+    Application.put_env(:march, :last_feishu_tracker_fetch_stats, %{})
+  end
+
+  defp summarize_tracker_fetch_stats(stats_by_mode) when is_map(stats_by_mode) do
+    full_scan_stats = Map.get(stats_by_mode, :full_scan)
+    hot_poll_stats = Map.get(stats_by_mode, :hot_poll)
+
+    case {full_scan_stats, hot_poll_stats} do
+      {%{} = full_scan_stats, %{} = hot_poll_stats} ->
+        full_scan_stats
+        |> merge_tracker_fetch_stats(hot_poll_stats)
+        |> Map.put(:mode, :full_scan_plus_hot)
+
+      {%{} = full_scan_stats, _} ->
+        full_scan_stats
+
+      {_, %{} = hot_poll_stats} ->
+        hot_poll_stats
+
+      _ ->
+        nil
+    end
+  end
+
+  defp summarize_tracker_fetch_stats(_stats_by_mode), do: nil
+
+  defp merge_tracker_fetch_stats(left, right) when is_map(left) and is_map(right) do
+    Map.merge(left, right, fn _key, left_value, right_value ->
+      cond do
+        is_integer(left_value) and is_integer(right_value) -> left_value + right_value
+        true -> right_value
+      end
+    end)
   end
 
   defp apply_candidate_dispatch(%State{} = state, :ok, {:ok, issues}) when is_list(issues) do
@@ -531,6 +789,27 @@ defmodule March.Orchestrator do
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
+  end
+
+  @doc false
+  @spec run_poll_snapshot_for_test(term(), module(), (-> term())) ::
+          {:ok, map()} | {:error, term()}
+  def run_poll_snapshot_for_test(%State{} = state, tracker, validator \\ fn -> :ok end)
+      when is_atom(tracker) and is_function(validator, 0) do
+    run_poll_snapshot(state, tracker, validator)
+  end
+
+  @doc false
+  @spec finish_poll_cycle_for_test(term(), map()) :: term()
+  def finish_poll_cycle_for_test(%State{} = state, snapshot) when is_map(snapshot) do
+    finish_poll_cycle(state, snapshot)
+  end
+
+  @doc false
+  @spec run_startup_workspace_cleanup_for_test(module(), (-> term())) :: :ok
+  def run_startup_workspace_cleanup_for_test(tracker, validator \\ fn -> :ok end)
+      when is_atom(tracker) and is_function(validator, 0) do
+    run_startup_workspace_cleanup(tracker, validator)
   end
 
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
@@ -1129,21 +1408,21 @@ defmodule March.Orchestrator do
   end
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    case Tracker.fetch_candidate_issues() do
+    case Tracker.fetch_issue_states_by_ids([issue_id]) do
       {:ok, issues} ->
         issues
         |> find_issue_by_id(issue_id)
         |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
 
       {:error, reason} ->
-        Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+        Logger.warning("Retry refresh failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
 
         {:noreply,
          schedule_issue_retry(
            state,
            issue_id,
            attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           Map.merge(metadata, %{error: "retry refresh failed: #{inspect(reason)}"})
          )}
     end
   end
@@ -1179,37 +1458,42 @@ defmodule March.Orchestrator do
 
   defp cleanup_issue_workspace(_identifier), do: :ok
 
-  defp schedule_startup_terminal_workspace_cleanup do
-    send(self(), :run_startup_terminal_workspace_cleanup)
+  defp schedule_startup_workspace_cleanup do
+    send(self(), :run_startup_workspace_cleanup)
     :ok
   end
 
-  defp run_terminal_workspace_cleanup do
-    Logger.info("Starting asynchronous terminal workspace cleanup")
+  defp run_startup_workspace_cleanup do
+    run_startup_workspace_cleanup(Tracker, fn -> Config.validate!() end)
+  end
 
-    case Config.validate!() do
+  defp run_startup_workspace_cleanup(tracker, validator)
+       when is_atom(tracker) and is_function(validator, 0) do
+    Logger.info("Starting asynchronous startup workspace cleanup")
+
+    case validator.() do
       :ok ->
-        case Tracker.fetch_issues_by_states(Config.terminal_states()) do
+        case tracker.fetch_candidate_issues() do
           {:ok, issues} ->
-            issues
-            |> Enum.each(fn
-              %Issue{id: issue_id, identifier: identifier} when is_binary(identifier) ->
-                PlannerSessions.release(issue_id)
-                cleanup_issue_workspace(identifier)
+            active_identifiers =
+              issues
+              |> Enum.map(fn
+                %Issue{identifier: identifier} when is_binary(identifier) -> identifier
+                _issue -> nil
+              end)
+              |> Enum.reject(&is_nil/1)
 
-              _ ->
-                :ok
-            end)
+            Workspace.remove_stale_issue_workspaces(active_identifiers)
 
           {:error, reason} ->
-            Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+            Logger.warning("Skipping startup workspace cleanup; failed to fetch visible tasks: #{inspect(reason)}")
         end
 
       {:error, reason} ->
-        Logger.debug("Skipping startup terminal workspace cleanup; tracker not ready: #{inspect(reason)}")
+        Logger.debug("Skipping startup workspace cleanup; tracker not ready: #{inspect(reason)}")
     end
 
-    Logger.info("Finished asynchronous terminal workspace cleanup")
+    Logger.info("Finished asynchronous startup workspace cleanup")
   end
 
   defp notify_dashboard do
@@ -1391,11 +1675,17 @@ defmodule March.Orchestrator do
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
          poll_interval_ms: state.poll_interval_ms,
+         full_scan_interval_ms: full_scan_interval_for_mode(state, state.full_scan_mode),
+         full_scan_mode: state.full_scan_mode,
+         consecutive_empty_full_scans: state.consecutive_empty_full_scans,
+         next_full_scan_in_ms: next_poll_in_ms(state.next_full_scan_due_at_ms, now_ms),
          last_completed_at: state.last_poll_completed_at,
          last_successful_at: state.last_successful_poll_at,
+         last_full_scan_at: state.last_full_scan_at,
          last_duration_ms: state.last_poll_duration_ms,
          last_status: state.last_poll_status,
-         last_stats: state.last_poll_stats
+         last_stats: state.last_poll_stats,
+         hot_issue_count: MapSet.size(state.hot_issue_ids)
        }
      }, state}
   end
@@ -1535,6 +1825,9 @@ defmodule March.Orchestrator do
     %{
       state
       | poll_interval_ms: Config.poll_interval_ms(),
+        full_scan_interval_ms: Config.full_scan_interval_ms(),
+        idle_full_scan_interval_ms: Config.idle_full_scan_interval_ms(),
+        idle_after_empty_full_scans: Config.idle_after_empty_full_scans(),
         max_concurrent_agents: Config.max_concurrent_agents()
     }
   end

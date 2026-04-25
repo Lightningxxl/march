@@ -119,6 +119,42 @@ defmodule March.ExtensionsTest do
     assert March.Tracker.adapter() == TaskAdapter
   end
 
+  test "polling config accepts explicit hot/full scan intervals and idle scan backoff" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_comments_cache_ttl_ms: 45_000,
+      tracker_task_fetch_max_concurrency: 4,
+      hot_poll_interval_ms: 15_000,
+      full_scan_interval_ms: 60_000,
+      idle_full_scan_interval_ms: 180_000,
+      idle_after_empty_full_scans: 2
+    )
+
+    assert Config.poll_interval_ms() == 15_000
+    assert Config.hot_poll_interval_ms() == 15_000
+    assert Config.full_scan_interval_ms() == 60_000
+    assert Config.idle_full_scan_interval_ms() == 180_000
+    assert Config.idle_after_empty_full_scans() == 2
+    assert Config.feishu_comments_cache_ttl_ms() == 45_000
+    assert Config.feishu_task_fetch_max_concurrency() == 4
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_comments_cache_ttl_ms: 90_000,
+      tracker_task_fetch_max_concurrency: 2,
+      hot_poll_interval_ms: 30_000,
+      full_scan_interval_ms: 90_000,
+      idle_full_scan_interval_ms: 420_000,
+      idle_after_empty_full_scans: 4
+    )
+
+    assert Config.poll_interval_ms() == 30_000
+    assert Config.hot_poll_interval_ms() == 30_000
+    assert Config.full_scan_interval_ms() == 90_000
+    assert Config.idle_full_scan_interval_ms() == 420_000
+    assert Config.idle_after_empty_full_scans() == 4
+    assert Config.feishu_comments_cache_ttl_ms() == 90_000
+    assert Config.feishu_task_fetch_max_concurrency() == 2
+  end
+
   defp assert_eventually(fun, attempts \\ 20)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do

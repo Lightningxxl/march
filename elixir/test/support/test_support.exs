@@ -92,13 +92,18 @@ defmodule March.TestSupport do
           tracker_tasklist_guid: nil,
           tracker_identity: "user",
           tracker_lark_cli_command: "lark-cli",
+          tracker_comments_cache_ttl_ms: 60_000,
+          tracker_task_fetch_max_concurrency: 6,
           tracker_default_stage: "Backlog",
           tracker_active_states: ["Building", "Merging"],
           tracker_builder_states: ["Building", "Merging"],
           tracker_planner_states: ["Planning"],
           tracker_auditor_states: ["Auditing"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
-          poll_interval_ms: 30_000,
+          hot_poll_interval_ms: 30_000,
+          full_scan_interval_ms: 60_000,
+          idle_full_scan_interval_ms: 300_000,
+          idle_after_empty_full_scans: 3,
           workspace_root: Path.join(System.tmp_dir!(), "march_workspaces"),
           max_concurrent_agents: 10,
           max_turns: 20,
@@ -128,13 +133,18 @@ defmodule March.TestSupport do
     tracker_tasklist_guid = Keyword.get(config, :tracker_tasklist_guid)
     tracker_identity = Keyword.get(config, :tracker_identity)
     tracker_lark_cli_command = Keyword.get(config, :tracker_lark_cli_command)
+    tracker_comments_cache_ttl_ms = Keyword.get(config, :tracker_comments_cache_ttl_ms)
+    tracker_task_fetch_max_concurrency = Keyword.get(config, :tracker_task_fetch_max_concurrency)
     tracker_default_stage = Keyword.get(config, :tracker_default_stage)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_builder_states = Keyword.get(config, :tracker_builder_states)
     tracker_planner_states = Keyword.get(config, :tracker_planner_states)
     tracker_auditor_states = Keyword.get(config, :tracker_auditor_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
-    poll_interval_ms = Keyword.get(config, :poll_interval_ms)
+    hot_poll_interval_ms = Keyword.get(config, :hot_poll_interval_ms)
+    full_scan_interval_ms = Keyword.get(config, :full_scan_interval_ms)
+    idle_full_scan_interval_ms = Keyword.get(config, :idle_full_scan_interval_ms)
+    idle_after_empty_full_scans = Keyword.get(config, :idle_after_empty_full_scans)
     workspace_root = Keyword.get(config, :workspace_root)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
@@ -165,6 +175,8 @@ defmodule March.TestSupport do
         "  tasklist_guid: #{yaml_value(tracker_tasklist_guid)}",
         "  identity: #{yaml_value(tracker_identity)}",
         "  lark_cli_command: #{yaml_value(tracker_lark_cli_command)}",
+        "  comments_cache_ttl_ms: #{yaml_value(tracker_comments_cache_ttl_ms)}",
+        "  task_fetch_max_concurrency: #{yaml_value(tracker_task_fetch_max_concurrency)}",
         "  default_stage: #{yaml_value(tracker_default_stage)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  builder_states: #{yaml_value(tracker_builder_states)}",
@@ -172,7 +184,10 @@ defmodule March.TestSupport do
         "  auditor_states: #{yaml_value(tracker_auditor_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         "polling:",
-        "  interval_ms: #{yaml_value(poll_interval_ms)}",
+        "  hot_poll_interval_ms: #{yaml_value(hot_poll_interval_ms)}",
+        "  full_scan_interval_ms: #{yaml_value(full_scan_interval_ms)}",
+        "  idle_full_scan_interval_ms: #{yaml_value(idle_full_scan_interval_ms)}",
+        "  idle_after_empty_full_scans: #{yaml_value(idle_after_empty_full_scans)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         "agent:",

@@ -256,6 +256,13 @@ sequenceDiagram
 - 哪些反馈回路是自动的
 - 哪些地方必须回到 human review
 
+按当前实现，还需要补几条运行语义：
+
+- March 发现候选 task 的入口是 `completed=false`，不是简单按看板列全量扫。
+- `Planning`、`Building`、`Auditing` 是 comment-driven stage；`Human Review` 和 `Merging` 不会自动轮询评论。
+- `Human Review` 是人工闸门。如果需要继续自动化处理，人要把 task 再拖回相应 lane。
+- `Merging` 是 builder 的 landing 模式；builder 把 task 落到 `Done` 之类 terminal stage 后，March 会自动补上 completed 标记。
+
 ### 4.6 Workspace 和 canonical branch：把执行边界收清楚
 
 March 不是直接在目标 repo 根目录里编码，而是为 builder / auditor 维护隔离 workspace。

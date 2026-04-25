@@ -3,6 +3,8 @@ tracker:
   tasklist_guid: null
   identity: "user"
   lark_cli_command: "lark-cli"
+  comments_cache_ttl_ms: 60000
+  task_fetch_max_concurrency: 6
   default_stage: "Backlog"
   active_states: ["Building", "Merging"]
   builder_states: ["Building", "Merging"]
@@ -10,7 +12,10 @@ tracker:
   auditor_states: ["Auditing"]
   terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
 polling:
-  interval_ms: 30000
+  hot_poll_interval_ms: 30000
+  full_scan_interval_ms: 60000
+  idle_full_scan_interval_ms: 300000
+  idle_after_empty_full_scans: 3
 workspace:
   root: "/tmp/march_workspaces"
 agent:

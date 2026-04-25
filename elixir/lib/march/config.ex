@@ -17,6 +17,8 @@ defmodule March.Config do
   @default_task_key_prefix nil
   @default_lark_cli_command "lark-cli"
   @default_lark_cli_timeout_ms 20_000
+  @default_comments_cache_ttl_ms 60_000
+  @default_task_fetch_max_concurrency 6
   @default_prompt_template """
   You are working on a Feishu task.
 
@@ -33,6 +35,9 @@ defmodule March.Config do
   {% endif %}
   """
   @default_poll_interval_ms 30_000
+  @default_full_scan_interval_ms 60_000
+  @default_idle_full_scan_interval_ms 300_000
+  @default_idle_after_empty_full_scans 3
   @default_workspace_root Path.join(System.tmp_dir!(), "march_workspaces")
   @default_hook_timeout_ms 60_000
   @default_max_concurrent_agents 10
@@ -75,6 +80,14 @@ defmodule March.Config do
                                    type: :pos_integer,
                                    default: @default_lark_cli_timeout_ms
                                  ],
+                                 comments_cache_ttl_ms: [
+                                   type: :pos_integer,
+                                   default: @default_comments_cache_ttl_ms
+                                 ],
+                                 task_fetch_max_concurrency: [
+                                   type: :pos_integer,
+                                   default: @default_task_fetch_max_concurrency
+                                 ],
                                  default_stage: [type: :string, default: @default_tracker_stage],
                                  active_states: [
                                    type: {:list, :string},
@@ -102,7 +115,19 @@ defmodule March.Config do
                                type: :map,
                                default: %{},
                                keys: [
-                                 interval_ms: [type: :integer, default: @default_poll_interval_ms]
+                                 hot_poll_interval_ms: [type: {:or, [:integer, nil]}, default: nil],
+                                 full_scan_interval_ms: [
+                                   type: {:or, [:integer, nil]},
+                                   default: @default_full_scan_interval_ms
+                                 ],
+                                 idle_full_scan_interval_ms: [
+                                   type: {:or, [:integer, nil]},
+                                   default: @default_idle_full_scan_interval_ms
+                                 ],
+                                 idle_after_empty_full_scans: [
+                                   type: {:or, [:integer, nil]},
+                                   default: @default_idle_after_empty_full_scans
+                                 ]
                                ]
                              ],
                              workspace: [
@@ -262,6 +287,26 @@ defmodule March.Config do
     |> scalar_or_default(@default_tracker_stage)
   end
 
+  @spec feishu_comments_cache_ttl_ms() :: pos_integer()
+  def feishu_comments_cache_ttl_ms do
+    validated_workflow_options()
+    |> get_in([:tracker, :comments_cache_ttl_ms])
+    |> case do
+      ttl when is_integer(ttl) and ttl > 0 -> ttl
+      _ -> @default_comments_cache_ttl_ms
+    end
+  end
+
+  @spec feishu_task_fetch_max_concurrency() :: pos_integer()
+  def feishu_task_fetch_max_concurrency do
+    validated_workflow_options()
+    |> get_in([:tracker, :task_fetch_max_concurrency])
+    |> case do
+      value when is_integer(value) and value > 0 -> value
+      _ -> @default_task_fetch_max_concurrency
+    end
+  end
+
   @spec active_states() :: [String.t()]
   def active_states do
     builder_states()
@@ -342,7 +387,47 @@ defmodule March.Config do
 
   @spec poll_interval_ms() :: pos_integer()
   def poll_interval_ms do
-    get_in(validated_workflow_options(), [:polling, :interval_ms])
+    hot_poll_interval_ms()
+  end
+
+  @spec hot_poll_interval_ms() :: pos_integer()
+  def hot_poll_interval_ms do
+    polling = get_in(validated_workflow_options(), [:polling])
+
+    case Map.get(polling, :hot_poll_interval_ms) do
+      interval when is_integer(interval) and interval > 0 -> interval
+      _ -> @default_poll_interval_ms
+    end
+  end
+
+  @spec full_scan_interval_ms() :: pos_integer()
+  def full_scan_interval_ms do
+    validated_workflow_options()
+    |> get_in([:polling, :full_scan_interval_ms])
+    |> case do
+      interval when is_integer(interval) and interval > 0 -> interval
+      _ -> @default_full_scan_interval_ms
+    end
+  end
+
+  @spec idle_full_scan_interval_ms() :: pos_integer()
+  def idle_full_scan_interval_ms do
+    validated_workflow_options()
+    |> get_in([:polling, :idle_full_scan_interval_ms])
+    |> case do
+      interval when is_integer(interval) and interval > 0 -> interval
+      _ -> @default_idle_full_scan_interval_ms
+    end
+  end
+
+  @spec idle_after_empty_full_scans() :: pos_integer()
+  def idle_after_empty_full_scans do
+    validated_workflow_options()
+    |> get_in([:polling, :idle_after_empty_full_scans])
+    |> case do
+      value when is_integer(value) and value > 0 -> value
+      _ -> @default_idle_after_empty_full_scans
+    end
   end
 
   @spec workspace_root() :: Path.t()
@@ -560,6 +645,8 @@ defmodule March.Config do
     |> put_if_present(:task_key_prefix, scalar_string_value(Map.get(section, "task_key_prefix")))
     |> put_if_present(:lark_cli_command, scalar_string_value(Map.get(section, "lark_cli_command")))
     |> put_if_present(:lark_cli_timeout_ms, positive_integer_value(Map.get(section, "lark_cli_timeout_ms")))
+    |> put_if_present(:comments_cache_ttl_ms, positive_integer_value(Map.get(section, "comments_cache_ttl_ms")))
+    |> put_if_present(:task_fetch_max_concurrency, positive_integer_value(Map.get(section, "task_fetch_max_concurrency")))
     |> put_if_present(:default_stage, scalar_string_value(Map.get(section, "default_stage")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:builder_states, csv_value(Map.get(section, "builder_states")))
@@ -577,7 +664,16 @@ defmodule March.Config do
 
   defp extract_polling_options(section) do
     %{}
-    |> put_if_present(:interval_ms, integer_value(Map.get(section, "interval_ms")))
+    |> put_if_present(:hot_poll_interval_ms, integer_value(Map.get(section, "hot_poll_interval_ms")))
+    |> put_if_present(:full_scan_interval_ms, integer_value(Map.get(section, "full_scan_interval_ms")))
+    |> put_if_present(
+      :idle_full_scan_interval_ms,
+      integer_value(Map.get(section, "idle_full_scan_interval_ms"))
+    )
+    |> put_if_present(
+      :idle_after_empty_full_scans,
+      integer_value(Map.get(section, "idle_after_empty_full_scans"))
+    )
   end
 
   defp extract_workspace_options(section) do

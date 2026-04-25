@@ -18,8 +18,6 @@ defmodule March.Feishu.TaskAdapter do
   @task_key_field "Task Key"
   @backlog_stage "Backlog"
   @context_cache_ttl_ms 300_000
-  @comments_cache_ttl_ms 15_000
-  @task_fetch_max_concurrency 6
   @context_cache_key {__MODULE__, :context_cache}
   @issue_cache_key {__MODULE__, :issue_cache}
 
@@ -30,7 +28,7 @@ defmodule March.Feishu.TaskAdapter do
     with {:ok, guids} <- task_client().list_tasklist_task_guids(tasklist_guid),
          {:ok, context} <- tasklist_context(tasklist_guid) do
       {issues, stats} = fetch_and_normalize_tasks(guids, context)
-      store_candidate_fetch_stats(stats)
+      store_fetch_stats(stats, :full_scan)
       {:ok, issues}
     end
   end
@@ -55,7 +53,8 @@ defmodule March.Feishu.TaskAdapter do
     tasklist_guid = Config.feishu_tasklist_guid()
 
     with {:ok, context} <- tasklist_context(tasklist_guid) do
-      {issues, _stats} = fetch_and_normalize_tasks(Enum.uniq(issue_ids), context)
+      {issues, stats} = fetch_and_normalize_tasks(Enum.uniq(issue_ids), context)
+      store_fetch_stats(stats, :hot_poll)
       {:ok, issues}
     end
   end
@@ -87,6 +86,7 @@ defmodule March.Feishu.TaskAdapter do
          {:ok, sections} <- task_client().list_sections(tasklist_guid),
          {:ok, section_guid} <- section_guid_for_state(sections, state_name),
          :ok <- task_client().move_task_to_section(issue_id, tasklist_guid, section_guid) do
+      maybe_complete_terminal_state_transition(issue_id, state_name)
       :ok
     else
       nil -> {:error, :missing_feishu_tasklist_guid}
@@ -197,8 +197,9 @@ defmodule March.Feishu.TaskAdapter do
   defp fetch_and_normalize_task(task_guid, context) do
     with {:ok, task} <- task_client().get_task(task_guid),
          {:ok, task, sync_stats} <- maybe_sync_task_key(task, context),
+         {:ok, task, terminal_stats} <- maybe_sync_terminal_completion(task, context),
          {:ok, issue, cache_stats} <- normalize_task_with_cache(task, task_guid, context) do
-      {:ok, issue, merge_fetch_stats(sync_stats, cache_stats)}
+      {:ok, issue, sync_stats |> merge_fetch_stats(terminal_stats) |> merge_fetch_stats(cache_stats)}
     end
   end
 
@@ -274,6 +275,35 @@ defmodule March.Feishu.TaskAdapter do
     end
   end
 
+  defp maybe_sync_terminal_completion(task, context) when is_map(task) and is_map(context) do
+    task_guid = Map.get(task, "guid")
+    stage_name = stage_name_for_task(task, context)
+
+    cond do
+      not terminal_state?(stage_name) ->
+        {:ok, task, default_fetch_stats()}
+
+      not completion_missing?(task) ->
+        {:ok, task, default_fetch_stats()}
+
+      not is_binary(task_guid) ->
+        {:ok, task, default_fetch_stats()}
+
+      true ->
+        completed_at = current_unix_ms_string()
+
+        case task_client().patch_task(task_guid, ["completed_at"], %{"completed_at" => completed_at}) do
+          {:ok, patched_task} ->
+            {:ok, patched_task, %{patches: 1}}
+
+          {:error, reason} ->
+            Logger.warning("Failed to mark terminal task as completed task_guid=#{task_guid} stage=#{stage_name}: #{inspect(reason)}")
+
+            {:ok, task, default_fetch_stats()}
+        end
+    end
+  end
+
   defp assignee_id(%{"members" => members}) when is_list(members) do
     members
     |> Enum.find(fn member -> Map.get(member, "role") == "assignee" end)
@@ -323,6 +353,59 @@ defmodule March.Feishu.TaskAdapter do
       %{"tasklist_guid" => ^configured_guid} when is_binary(configured_guid) -> true
       _ -> false
     end) || List.first(tasklists)
+  end
+
+  defp stage_name_for_task(task, context) when is_map(task) and is_map(context) do
+    task
+    |> Map.get("tasklists", [])
+    |> select_tasklist()
+    |> case do
+      %{} = tasklist -> stage_name(Map.get(tasklist, "section_guid"), context)
+      _ -> Config.default_tracker_stage()
+    end
+  end
+
+  defp terminal_state?(state_name) when is_binary(state_name) do
+    normalized_state = normalize_state(state_name)
+
+    Config.terminal_states()
+    |> Enum.any?(fn candidate -> normalize_state(candidate) == normalized_state end)
+  end
+
+  defp terminal_state?(_state_name), do: false
+
+  defp completion_missing?(task) when is_map(task) do
+    case Map.get(task, "completed_at") do
+      nil -> true
+      0 -> true
+      "0" -> true
+      value when is_binary(value) -> blank_to_nil(value) == nil
+      _ -> false
+    end
+  end
+
+  defp maybe_complete_terminal_state_transition(issue_id, state_name)
+       when is_binary(issue_id) and is_binary(state_name) do
+    if terminal_state?(state_name) do
+      completed_at = current_unix_ms_string()
+
+      case task_client().patch_task(issue_id, ["completed_at"], %{"completed_at" => completed_at}) do
+        {:ok, _task} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Failed to mark terminal task as completed after state transition issue_id=#{issue_id} state=#{state_name}: #{inspect(reason)}")
+
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp current_unix_ms_string do
+    System.system_time(:millisecond)
+    |> Integer.to_string()
   end
 
   defp section_guid_for_state(sections, state_name) when is_list(sections) and is_binary(state_name) do
@@ -562,7 +645,7 @@ defmodule March.Feishu.TaskAdapter do
   defp task_fetch_max_concurrency(task_guids) when is_list(task_guids) do
     task_guids
     |> length()
-    |> min(@task_fetch_max_concurrency)
+    |> min(Config.feishu_task_fetch_max_concurrency())
     |> max(1)
   end
 
@@ -649,7 +732,7 @@ defmodule March.Feishu.TaskAdapter do
 
   defp comments_cache_stale?(comments_synced_at_ms, now_ms)
        when is_integer(comments_synced_at_ms) and is_integer(now_ms) do
-    now_ms - comments_synced_at_ms > @comments_cache_ttl_ms
+    now_ms - comments_synced_at_ms > Config.feishu_comments_cache_ttl_ms()
   end
 
   defp comments_cache_stale?(_comments_synced_at_ms, _now_ms), do: true
@@ -685,11 +768,23 @@ defmodule March.Feishu.TaskAdapter do
   defp put_context_cache(cache) when is_map(cache), do: :persistent_term.put(@context_cache_key, cache)
   defp put_issue_cache(cache) when is_map(cache), do: :persistent_term.put(@issue_cache_key, cache)
 
-  defp store_candidate_fetch_stats(stats) when is_map(stats) do
+  defp store_fetch_stats(stats, mode) when is_map(stats) and is_atom(mode) do
+    current =
+      case Application.get_env(:march, :last_feishu_tracker_fetch_stats) do
+        %{} = stats_by_mode -> stats_by_mode
+        _ -> %{}
+      end
+
     Application.put_env(
       :march,
-      :last_feishu_candidate_fetch_stats,
-      Map.put(stats, :captured_at, DateTime.utc_now())
+      :last_feishu_tracker_fetch_stats,
+      Map.put(
+        current,
+        mode,
+        stats
+        |> Map.put(:captured_at, DateTime.utc_now())
+        |> Map.put(:mode, mode)
+      )
     )
   end
 

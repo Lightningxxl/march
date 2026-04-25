@@ -97,7 +97,14 @@ Typical lifecycle:
 3. Human reviews the plan in the same task.
 4. Builder executes the work in an isolated workspace and updates the workpad in place.
 5. Auditor validates the result and either sends it back for more work or clears it for human review.
-6. Human reviews and merges according to repo policy.
+6. Human reviews the outcome, moves approved work to `Merging`, and builder completes the landing flow according to repo policy.
+
+Operator notes:
+
+- March discovers candidate tasks from the Feishu tasklist by scanning items that are still `completed=false`.
+- Comments are polled automatically only in `Planning`, `Building`, and `Auditing`.
+- `Human Review` is a manual gate. Comments there do not wake planner or auditor automatically; move the task back to the target automation stage when more work is needed.
+- `Merging` is builder-owned landing mode. Builder normally moves landed work into a terminal stage such as `Done`, and March then marks the task completed so it drops out of polling.
 
 Design principles:
 

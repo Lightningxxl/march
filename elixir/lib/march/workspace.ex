@@ -81,6 +81,36 @@ defmodule March.Workspace do
     :ok
   end
 
+  @spec remove_stale_issue_workspaces([String.t()]) :: :ok
+  def remove_stale_issue_workspaces(active_identifiers) when is_list(active_identifiers) do
+    active_workspace_ids =
+      active_identifiers
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&safe_identifier/1)
+      |> MapSet.new()
+
+    case File.ls(Config.workspace_root()) do
+      {:ok, entries} ->
+        Enum.each(entries, fn entry ->
+          workspace = Path.join(Config.workspace_root(), entry)
+
+          if File.dir?(workspace) and not MapSet.member?(active_workspace_ids, entry) do
+            remove(workspace)
+          end
+        end)
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed listing issue workspaces root=#{Config.workspace_root()}: #{inspect(reason)}")
+    end
+
+    :ok
+  end
+
+  def remove_stale_issue_workspaces(_active_identifiers), do: :ok
+
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil) :: :ok | {:error, term()}
   def run_before_run_hook(workspace, issue_or_identifier) when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)

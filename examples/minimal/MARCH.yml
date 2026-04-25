@@ -6,6 +6,8 @@ tracker:
   identity: "user"
   task_key_prefix: "demo"
   lark_cli_command: "lark-cli"
+  comments_cache_ttl_ms: 60000
+  task_fetch_max_concurrency: 2
   default_stage: "Backlog"
   builder_states:
     - Building
@@ -18,7 +20,10 @@ tracker:
     - Done
     - Canceled
 polling:
-  interval_ms: 15000
+  hot_poll_interval_ms: 30000
+  full_scan_interval_ms: 60000
+  idle_full_scan_interval_ms: 300000
+  idle_after_empty_full_scans: 3
 workspace:
   root: "/tmp/march-workspaces"
 agent:
